@@ -34,6 +34,7 @@ resource "null_resource" "setup_server" {
     type        = "ssh"
     user        = var.server_user
     host        = var.server_ip
+    port        = var.server_port
     private_key = file(var.private_key_path)
   }
 }

@@ -23,3 +23,8 @@ variable "private_key_path" {
 variable "github_repo_url" {
   default = "https://github.com/dokkiitech/ServerRebooter"
 }
+
+variable "server_port" {
+  type        = number
+  description = "The SSH port to connect to."
+}
