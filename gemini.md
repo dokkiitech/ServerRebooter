@@ -1,19 +1,16 @@
-## TerraformとGitHub Actionsで作るサーバー再起動ワークフロー手順書**
+TerraformとGitHub Actionsで作るサーバー再起動ワークフロー手順書**
 
 ### **はじめに**
 
-この手順書は、Slackコマンドを起点としてオンプレミスのDebianサーバーを再起動し、GitHubリポジトリ内の`rebootlist.md`ファイルに記載されたディレクトリのDocker Composeプロジェクトを自動で立ち上げる、拡張性の高いワークフローを構築します。
+この手順書は、Slackからスラッシュコマンドを実行することで、オンプレミスのDebianサーバーを安全に再起動し、GitHubリポジトリ内の`rebootlist.md`ファイルに記載されたディレクトリのDocker Composeプロジェクトを自動で立ち上げるための、完全なガイドです。
 
 **ワークフローの全体像**
 
 1.  **Slack**: ユーザーが `/server-reboot` を実行。
-2.  **Pipedream**: SlackからのリクエストをGitHubへ安全に転送。
-3.  **GitHub Actions**: ワークフローを開始し、自己ホストランナーに再起動を指示。
-4.  **サーバー**:
-      * **再起動**: ランナーが再起動コマンドを実行。
-      * **起動後**: `systemd`サービスが自動起動。
-      * **設定更新**: GitHubから`rebootlist.md`を含むリポジトリを`git pull`で最新化。
-      * **コンテナ起動**: `rebootlist.md`のリストに従い、各ディレクトリで`docker compose up -d`を順番に実行。
+2.  **Pipedream**: Slackからのリクエストを受け取り、GitHubへ安全にAPIリクエストを送信。
+3.  **GitHub Actions**: Pipedreamからのリクエストをトリガーにワークフローを開始。
+4.  **自己ホストランナー**: サーバー上で待機しているランナーがジョブを受け取り、再起動コマンドを実行。
+5.  **サーバー (systemd)**: 再起動後、OSの仕組み（systemd）がDocker Composeを自動実行。
 
 -----
 
@@ -23,7 +20,7 @@
 
   * **GitHubアカウント**:
       * ワークフローを管理するリポジトリ (`dokkiitech/ServerRebooter`) を作成しておきます。
-      * **Personal Access Token (PAT)** を[ここから作成](https://github.com/settings/tokens/new)し、`repo` スコープにチェックを入れて生成します。
+      * **Personal Access Token (PAT)** を[ここから作成](https://github.com/settings/tokens/new)し、`repo` スコープにチェックを入れて生成します。このトークンは後で複数回使用します。
   * **SSHデプロイキー**:
       * 手元のPCで `ssh-keygen -t ed25519 -f ./rebooter_key` を実行し、`rebooter_key`（秘密鍵）と `rebooter_key.pub`（公開鍵）を作成します。
       * 作成した**公開鍵** (`rebooter_key.pub`) の中身を、GitHubリポジトリの `Settings` \> `Deploy keys` \> `Add deploy key` から登録します（書き込み権限は不要）。
@@ -247,13 +244,88 @@ GitHubリポジトリ (`dokkiitech/ServerRebooter`) のルートに `rebootlist.
 
 ### **ステップ6：GitHub Actionsワークフローの設定**
 
-リポジトリの `.github/workflows/reboot.yml` にワークフローを作成し、リポジトリのSecretsに `SLACK_WEBHOOK_URL` を登録します。（この手順は[以前の回答](https://www.google.com/search?q=%23)から変更ありません）
+1.  リポジトリに `.github/workflows/reboot.yml` というパスでファイルを作成します。
+
+2.  以下の内容を貼り付けます。
+
+    ```yaml
+    name: Server Reboot Workflow
+
+    on:
+      repository_dispatch:
+        types: [reboot-server]
+
+    jobs:
+      reboot:
+        name: Reboot Server
+        runs-on: self-hosted
+
+        steps:
+          - name: Send reboot command
+            run: |
+              echo "Received a request from Slack. Rebooting the server..."
+              sudo shutdown -r +0
+
+          - name: Send notification to Slack
+            if: always()
+            uses: slackapi/slack-github-action@v1.25.0
+            with:
+              payload: |
+                {
+                  "text": "サーバーの再起動コマンドを実行しました。数分後にDockerコンテナが自動で起動します。"
+                }
+            env:
+              SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    ```
+
+3.  リポジトリの `Settings` \> `Secrets and variables` \> `Actions` に移動し、`New repository secret` をクリックします。
+
+      * **Name**: `SLACK_WEBHOOK_URL`
+      * **Secret**: 事前準備で取得したSlackのWebhook URL
 
 -----
 
 ### **ステップ7：SlackとPipedreamの連携**
 
-Slackスラッシュコマンド (`/server-reboot`) を作成し、PipedreamのWebhook経由でGitHub Actionsをトリガーします。（この手順も[以前の回答](https://www.google.com/search?q=%23)から変更ありません）
+1.  **Slackスラッシュコマンドの作成**:
+      * [Slack Appの管理画面](https://api.slack.com/apps)で `Slash Commands` \> `Create New Command` を選択。
+      * **Command**: `/server-reboot`
+      * **Request URL**: **この後のPipedreamで生成するURLを一時的に入力します。**
+      * **Short Description**: サーバーを再起動します。
+2.  **Pipedreamワークフローの作成**:
+      * Pipedreamで新しいワークフローを作成し、トリガーとして `HTTP / Webhook` を選択します。
+      * 表示された**Webhook URLをコピー**し、Slackスラッシュコマンドの **Request URL** に設定し直します。
+      * Pipedreamで `+` を押し `Code` を追加、以下のNode.jsコードを貼り付けます。
+        ```javascript
+        import { axios } from "@pipedream/platform";
+
+        export default defineComponent({
+          async run({ steps, $ }) {
+            // Slackに即時応答を返す
+            await $.respond({
+              status: 200,
+              body: {
+                response_type: "in_channel",
+                text: "了解しました。GitHub Actionsにサーバー再起動をリクエストしました。",
+              },
+            });
+
+            await axios($, {
+              method: "POST",
+              url: `https://api.github.com/repos/dokkiitech/ServerRebooter/dispatches`,
+              headers: {
+                "Accept": "application/vnd.github.v3+json",
+                "Authorization": `Bearer ${process.env.GITHUB_PAT}`,
+              },
+              data: {
+                event_type: "reboot-server",
+              },
+            });
+          },
+        });
+        ```
+      * 左メニューの `Environment Variables` で `GITHUB_PAT` という環境変数を作成し、値に**事前準備で取得したGitHub PAT**を設定します。
+      * `Deploy` をクリックしてワークフローを有効化します。
 
 -----
 

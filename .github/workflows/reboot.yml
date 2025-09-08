@@ -1,0 +1,27 @@
+name: Server Reboot Workflow
+
+on:
+  repository_dispatch:
+    types: [reboot-server]
+
+jobs:
+  reboot:
+    name: Reboot Server
+    runs-on: self-hosted
+
+    steps:
+      - name: Send reboot command
+        run: |
+          echo "Received a request from Slack. Rebooting the server..."
+          sudo shutdown -r +0
+
+      - name: Send notification to Slack
+        if: always()
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "text": "サーバーの再起動コマンドを実行しました。数分後にDockerコンテナが自動で起動します。"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
